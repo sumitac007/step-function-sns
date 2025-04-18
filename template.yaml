@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Step function triggered every 2 mins, sends SNS if random number is even.
+
+Globals:
+  Function:
+    Timeout: 5
+    Runtime: nodejs18.x
+    MemorySize: 128
+    Architectures: [x86_64]
+
+Resources:
+
+  RandomDecisionLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src
+      Handler: app.handler
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: StepFunctionNotification
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StateMachinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt RandomDecisionLambda.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+
+  RandomDecisionStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: RandomDecisionStateMachine
+      Role: !GetAtt StateMachineRole.Arn
+      Definition:
+        StartAt: InvokeLambda
+        States:
+          InvokeLambda:
+            Type: Task
+            Resource: !GetAtt RandomDecisionLambda.Arn
+            ResultPath: $.lambdaResult
+            Next: CheckEven
+          CheckEven:
+            Type: Choice
+            Choices:
+              - Variable: "$.lambdaResult.even"
+                BooleanEquals: true
+                Next: SendNotification
+            Default: EndState
+          SendNotification:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref NotificationTopic
+              Message: "Even number generated."
+              Subject: "Step Function Notification"
+            Next: EndState
+          EndState:
+            Type: Succeed
+
+  StepFunctionTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(2 minutes)
+      Targets:
+        - Arn: !Ref RandomDecisionStateMachine
+          Id: StepFunctionTrigger
+          RoleArn: !GetAtt StepFunctionEventRole.Arn
+
+  StepFunctionEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowStepFunctionStart
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref RandomDecisionStateMachine
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref RandomDecisionStateMachine
+  SNSTopicArn:
+    Value: !Ref NotificationTopic
